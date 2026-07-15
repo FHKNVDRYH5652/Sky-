@@ -1,0 +1,6 @@
+{
+  "name": "ZIP File Host",
+  "description": "Instant client-side static web hosting and previewer from ZIP files. Upload, inspect, edit, and preview websites in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
