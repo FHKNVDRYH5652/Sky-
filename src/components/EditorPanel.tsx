@@ -21,12 +21,14 @@ interface EditorPanelProps {
   file: VirtualFile | null;
   onSaveContent: (path: string, newText: string) => void;
   projectContext?: { [path: string]: string };
+  isBackendOnline?: boolean | null;
 }
 
 export const EditorPanel: React.FC<EditorPanelProps> = ({ 
   file, 
   onSaveContent,
-  projectContext = {}
+  projectContext = {},
+  isBackendOnline = null
 }) => {
   const [code, setCode] = useState<string>('');
   const [originalCode, setOriginalCode] = useState<string>('');
@@ -88,6 +90,10 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
     setAiError(null);
     
     try {
+      if (isBackendOnline === false) {
+        throw new Error("This hosted environment is in Static-Only Mode. Gemini AI Code Assist is offline. Run locally or deploy to a container (Cloud Run) to use AI Co-Writer!");
+      }
+
       const res = await fetch('/api/ai/edit', {
         method: 'POST',
         headers: {
@@ -100,6 +106,11 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
           projectContext
         }),
       });
+
+      const contentType = res.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error("Invalid response from server. The backend API is offline or hosted on a static-only provider (like Netlify) without the Express backend server.");
+      }
 
       if (!res.ok) {
         const errData = await res.json();
@@ -245,17 +256,17 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({
               <div className="flex gap-2">
                 <input
                   type="text"
-                  placeholder="Ask Gemini to edit code (e.g. 'add a beautiful responsive feedback form')"
+                  placeholder={isBackendOnline === false ? "AI Code Assist is offline (Static Mode)" : "Ask Gemini to edit code (e.g. 'add a beautiful responsive feedback form')"}
                   value={aiPrompt}
                   onChange={(e) => setAiPrompt(e.target.value)}
                   onKeyDown={(e) => e.key === 'Enter' && !isAiWorking && handleAiEdit()}
-                  className="flex-1 bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800 text-xs text-slate-300 placeholder-slate-600 outline-none focus:border-blue-500/50 transition-all font-sans"
-                  disabled={isAiWorking}
+                  className="flex-1 bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800 text-xs text-slate-300 placeholder-slate-600 outline-none focus:border-blue-500/50 transition-all font-sans disabled:opacity-40"
+                  disabled={isAiWorking || isBackendOnline === false}
                 />
                 <button
                   onClick={handleAiEdit}
-                  disabled={isAiWorking || !aiPrompt.trim()}
-                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white rounded-md text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors"
+                  disabled={isAiWorking || !aiPrompt.trim() || isBackendOnline === false}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white rounded-md text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors disabled:opacity-40"
                 >
                   {isAiWorking ? (
                     <Loader2 className="w-3.5 h-3.5 animate-spin" />

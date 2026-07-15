@@ -54,6 +54,7 @@ import { PreviewPanel } from './components/PreviewPanel';
 
 export default function App() {
   const [isSWReady, setIsSWReady] = useState<boolean>(false);
+  const [isBackendOnline, setIsBackendOnline] = useState<boolean | null>(null);
   const [isParsing, setIsParsing] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
   
@@ -127,6 +128,30 @@ export default function App() {
     } else {
       setError('Service Workers are not supported in this browser. Hosting features are disabled.');
     }
+  }, []);
+
+  // Check backend server health on mount & periodically
+  useEffect(() => {
+    const checkBackend = async () => {
+      try {
+        const res = await fetch('/api/health');
+        if (res.ok) {
+          const contentType = res.headers.get('content-type');
+          if (contentType && contentType.includes('application/json')) {
+            const data = await res.json();
+            if (data && data.status === 'ok') {
+              setIsBackendOnline(true);
+              return;
+            }
+          }
+        }
+        setIsBackendOnline(false);
+      } catch (e) {
+        console.warn('[ZipHost] Backend health check failed:', e);
+        setIsBackendOnline(false);
+      }
+    };
+    checkBackend();
   }, []);
 
   // Restore sites from IndexedDB & bots from localStorage on start
@@ -408,11 +433,20 @@ export default function App() {
     setError(null);
 
     try {
+      if (isBackendOnline === false) {
+        throw new Error("This hosted environment is running in Static-Only Mode. Web Extraction requires the live Node.js Express backend server. If hosted on Netlify, the server is not active. Please run locally or deploy to a container (Cloud Run) to use this feature.");
+      }
+
       const response = await fetch('/api/extract', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: clonerUrl })
       });
+
+      const contentType = response.headers.get('content-type');
+      if (!contentType || !contentType.includes('application/json')) {
+        throw new Error("Invalid response received from server. The backend API is offline or hosted on a static-only provider (like Netlify) without the Express backend server.");
+      }
 
       if (!response.ok) {
         const errData = await response.json();
@@ -937,12 +971,19 @@ export default function App() {
         sendReply: (text: string) => sendBotReplyInChat(text),
         getAI: async (prompt: string, callback: (reply: string) => void) => {
           try {
+            if (isBackendOnline === false) {
+              throw new Error("Gemini AI is offline. This environment is running in Static-Only Mode (no backend server). Please deploy to Cloud Run or run the backend server.");
+            }
             appendBotLog(`🤖 Contacting server-side Gemini AI proxy...`);
             const res = await fetch('/api/bot/ai', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ prompt })
             });
+            const contentType = res.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+              throw new Error("Invalid response received. The backend server is offline or not configured.");
+            }
             const data = await res.json();
             callback(data.reply || "No response received.");
           } catch (err: any) {
@@ -1149,9 +1190,16 @@ export default function App() {
         </div>
 
         {/* Liveness Indicator */}
-        <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900/60 border border-slate-800/80 rounded-lg text-xs font-mono text-slate-400">
-          <span className={`w-2 h-2 rounded-full ${isSWReady ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
-          <span>Server: {isSWReady ? 'ONLINE' : 'BOOTING'}</span>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900/60 border border-slate-800/80 rounded-lg text-xs font-mono text-slate-400" title="Local browser sandboxed virtual server">
+            <span className={`w-2 h-2 rounded-full ${isSWReady ? 'bg-emerald-500 animate-pulse' : 'bg-amber-500'}`} />
+            <span>Sandbox: {isSWReady ? 'READY' : 'BOOTING'}</span>
+          </div>
+
+          <div className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900/60 border border-slate-800/80 rounded-lg text-xs font-mono text-slate-400" title="Server-side scraping & AI engine status">
+            <span className={`w-2 h-2 rounded-full ${isBackendOnline === true ? 'bg-emerald-500 animate-pulse' : isBackendOnline === false ? 'bg-rose-500' : 'bg-amber-500'}`} />
+            <span>Backend: {isBackendOnline === true ? 'ONLINE' : isBackendOnline === false ? 'OFFLINE (Static Mode)' : 'CHECKING...'}</span>
+          </div>
         </div>
       </header>
 
@@ -1279,6 +1327,18 @@ export default function App() {
                           Enter any public website address. ZipHost will extract its full assets and trigger an automatic ZIP backup download!
                         </p>
                       </div>
+
+                      {isBackendOnline === false && (
+                        <div className="bg-amber-500/10 border border-amber-500/25 p-3 rounded-xl flex items-start gap-2.5 text-[11px] text-amber-300 leading-relaxed max-w-2xl">
+                          <AlertCircle className="w-4.5 h-4.5 text-amber-400 flex-shrink-0 mt-0.5" />
+                          <div>
+                            <span className="font-semibold block mb-0.5 text-amber-200">Static-Only Hosting Mode Active</span>
+                            This application is hosted on a static-only platform (like Netlify) without its Node.js backend. 
+                            <strong> Web Extraction, scraping, and Gemini AI code-generation are offline</strong>. 
+                            Please deploy this project to Google Cloud Run to unlock full-stack features. In the meantime, you can still upload ZIP files, create blank projects, and host/preview them locally with our offline Service Worker Sandbox!
+                          </div>
+                        </div>
+                      )}
 
                       <div className="flex flex-col sm:flex-row gap-2.5">
                         <div className="flex-1 flex items-center bg-slate-900 px-3.5 py-2 border border-slate-800 rounded-xl focus-within:border-blue-500/50 transition-all shadow-inner">
@@ -1685,6 +1745,7 @@ export default function App() {
                       file={getSelectedFileObject()}
                       onSaveContent={handleSaveContent}
                       projectContext={getProjectContextMap()}
+                      isBackendOnline={isBackendOnline}
                     />
                   </div>
 
