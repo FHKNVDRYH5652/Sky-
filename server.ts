@@ -116,6 +116,33 @@ ${prompt}
 });
 
 /**
+ * Bot AI Helper Proxy - Allows sandboxed bots to make secure server-side AI requests
+ */
+app.post('/api/bot/ai', async (req, res) => {
+  try {
+    const { prompt } = req.body;
+    if (!prompt) {
+      return res.status(400).json({ error: 'Prompt is required' });
+    }
+    
+    const ai = getGeminiClient();
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: prompt,
+      config: {
+        systemInstruction: 'You are a helpful chat bot agent. Keep replies brief, conversational, and direct (under 3 sentences). Do not use markdown styling unless necessary.',
+        temperature: 0.7,
+      },
+    });
+
+    res.json({ reply: response.text || "I'm not sure how to respond to that." });
+  } catch (err: any) {
+    console.error('[Bot AI Proxy Error]:', err);
+    res.json({ reply: `[AI Connection Error: ${err.message || 'Service offline'}]` });
+  }
+});
+
+/**
  * Generates a clean, modern, and beautiful hardcoded fallback page when cloning fails
  */
 function generateStaticFallback(domain: string, errorMessage: string) {
@@ -373,10 +400,18 @@ function generateStaticFallback(domain: string, errorMessage: string) {
  * Generates an ultra-premium simulated brand mockup using Gemini AI
  */
 async function generateMockupWithGemini(urlStr: string, errorMessage: string): Promise<{ siteName: string; files: { [path: string]: { content: string; mimeType: string; isBinary: boolean } } }> {
-  const targetUrl = new URL(urlStr);
-  const domain = targetUrl.hostname.replace('www.', '');
-  const siteName = domain.split('.')[0];
-  const capitalizedSiteName = siteName.charAt(0).toUpperCase() + siteName.slice(1);
+  let domain = 'example.com';
+  let siteName = 'sandbox';
+  let capitalizedSiteName = 'Sandbox';
+
+  try {
+    const targetUrl = new URL(urlStr);
+    domain = targetUrl.hostname.replace('www.', '') || 'example.com';
+    siteName = domain.split('.')[0] || 'sandbox';
+    capitalizedSiteName = siteName.charAt(0).toUpperCase() + siteName.slice(1);
+  } catch (e) {
+    console.warn('[Extractor] Failed parsing URL for mockup brand:', e);
+  }
 
   try {
     const ai = getGeminiClient();
@@ -433,7 +468,7 @@ Make it feel alive with rich details!
     };
   } catch (error: any) {
     console.error('[Mockup Generation Error]:', error);
-    return generateStaticFallback(domain, errorMessage);
+    return generateStaticFallback(domain, errorMessage || error.message);
   }
 }
 

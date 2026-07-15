@@ -147,5 +147,37 @@ bot.on('stop', () => {
   bot.log("🛑 Monitor daemon killed.");
 });
 `
+  },
+  {
+    name: "Gemini Conversational AI Bot",
+    description: "An advanced chat assistant that connects directly to the server-side Gemini API (gemini-2.5-flash) to answer any conversational query dynamically!",
+    defaultEnv: {
+      "BOT_NAME": "GeminiMind",
+      "SYS_PROMPT": "You are a witty, extremely smart developer helper. Keep answers short and fun!"
+    },
+    scriptValue: `// Gemini Conversational AI Bot
+// Connects directly to server-side Gemini flash API to generate dynamic natural responses!
+
+bot.on('start', () => {
+  bot.log(\`🟢 \${bot.env.BOT_NAME || 'GeminiMind'} is online and synced to the cloud.\`);
+  bot.log("💡 Send any text in the right Chat Portal. I will forward it to Gemini and reply!");
+});
+
+bot.on('message', (message) => {
+  const text = message.text;
+  bot.log(\`📥 Received user text: "\${text}"\`);
+  bot.log("🤖 Querying server-side Gemini model...");
+  
+  // Call the live Gemini model!
+  bot.getAI(text, (reply) => {
+    bot.log(\`📤 Gemini response received! Sending reply...\`);
+    bot.sendReply(reply);
+  });
+});
+
+bot.on('stop', () => {
+  bot.log("🛑 Gemini AI Bot has disconnected.");
+});
+`
   }
 ];

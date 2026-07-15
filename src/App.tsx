@@ -27,12 +27,14 @@ import {
   FolderOpen,
   FilePlus,
   BookOpen,
-  Check
+  Check,
+  ExternalLink
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import JSZip from 'jszip';
 
 import { HostedSite, FileTreeNode, VirtualFile, BotScript } from './types';
+import { saveSiteToDB, deleteSiteFromDB, loadSitesFromDB } from './db';
 import { 
   getMimeType, 
   isBinaryFile, 
@@ -68,6 +70,7 @@ export default function App() {
   
   // Crawler/Extractor input
   const [clonerUrl, setClonerUrl] = useState<string>('');
+  const [blankSiteName, setBlankSiteName] = useState<string>('');
   const [isCloning, setIsCloning] = useState<boolean>(false);
   const [cloneSuccessMsg, setCloneSuccessMsg] = useState<string | null>(null);
 
@@ -126,98 +129,68 @@ export default function App() {
     }
   }, []);
 
-  // Restore sites & bots from localStorage on start
+  // Restore sites from IndexedDB & bots from localStorage on start
   useEffect(() => {
-    const savedSitesJson = localStorage.getItem('ziphost_sites');
-    if (savedSitesJson) {
+    const restoreData = async () => {
+      // 1. Restore sites from IndexedDB
       try {
-        const parsed = JSON.parse(savedSitesJson);
-        const deserialized: HostedSite[] = parsed.map((site: any) => {
-          const filesMap: { [path: string]: VirtualFile } = {};
-          Object.entries(site.files).forEach(([p, rawFile]) => {
-            const file = rawFile as any;
-            filesMap[p] = {
-              path: file.path,
-              name: file.name,
-              mimeType: file.mimeType,
-              size: file.size,
-              isBinary: file.isBinary,
-              textValue: file.textValue,
-              content: base64ToArrayBuffer(file.base64)
-            };
-          });
-          return {
-            id: site.id,
-            name: site.name,
-            createdAt: site.createdAt,
-            files: filesMap
-          };
-        });
-        setSites(deserialized);
-        if (deserialized.length > 0) {
-          setActiveSiteId(deserialized[0].id);
+        const dbSites = await loadSitesFromDB();
+        if (dbSites && dbSites.length > 0) {
+          setSites(dbSites);
+          setActiveSiteId(dbSites[0].id);
+          
+          // Set preview and select paths
+          const paths = Object.keys(dbSites[0].files);
+          const indexHtml = paths.find(p => p.toLowerCase() === 'index.html' || p.toLowerCase().endsWith('index.html')) || paths[0] || 'index.html';
+          setActivePreviewPath(indexHtml);
+          setSelectedFilePath(indexHtml);
         }
       } catch (e) {
-        console.error('[ZipHost] Error restoring saved sites:', e);
+        console.error('[ZipHost] Error restoring saved sites from IndexedDB:', e);
       }
-    }
 
-    // Restore bots
-    const savedBotsJson = localStorage.getItem('ziphost_bots');
-    if (savedBotsJson) {
-      try {
-        const deserializedBots: BotScript[] = JSON.parse(savedBotsJson);
-        setBots(deserializedBots);
-        if (deserializedBots.length > 0) {
-          setActiveBotId(deserializedBots[0].id);
+      // 2. Restore bots from localStorage
+      const savedBotsJson = localStorage.getItem('ziphost_bots');
+      if (savedBotsJson) {
+        try {
+          const deserializedBots: BotScript[] = JSON.parse(savedBotsJson);
+          setBots(deserializedBots);
+          if (deserializedBots.length > 0) {
+            setActiveBotId(deserializedBots[0].id);
+          }
+        } catch (e) {
+          console.error('[ZipHost] Error restoring saved bots:', e);
         }
-      } catch (e) {
-        console.error('[ZipHost] Error restoring saved bots:', e);
+      } else {
+        // Seed default templates
+        const initialBots: BotScript[] = botTemplates.map((tpl, index) => ({
+          id: `bot-${Date.now()}-${index}`,
+          name: tpl.name,
+          scriptValue: tpl.scriptValue,
+          status: 'IDLE',
+          logs: [`[SYSTEM] Bot "${tpl.name}" registered in workspace. Click toggler to boot up.`],
+          env: { ...tpl.defaultEnv },
+          createdAt: Date.now() - index * 1000
+        }));
+        setBots(initialBots);
+        if (initialBots.length > 0) {
+          setActiveBotId(initialBots[0].id);
+        }
       }
-    } else {
-      // Seed default templates
-      const initialBots: BotScript[] = botTemplates.map((tpl, index) => ({
-        id: `bot-${Date.now()}-${index}`,
-        name: tpl.name,
-        scriptValue: tpl.scriptValue,
-        status: 'IDLE',
-        logs: [`[SYSTEM] Bot "${tpl.name}" registered in workspace. Click toggler to boot up.`],
-        env: { ...tpl.defaultEnv },
-        createdAt: Date.now() - index * 1000
-      }));
-      setBots(initialBots);
-      if (initialBots.length > 0) {
-        setActiveBotId(initialBots[0].id);
-      }
-    }
+    };
+
+    restoreData();
   }, []);
 
-  // Save sites to localStorage when updated
-  const persistSites = (updatedSites: HostedSite[]) => {
+  // Save sites to IndexedDB when updated
+  const persistSites = async (updatedSites: HostedSite[]) => {
     try {
-      const serialized = updatedSites.map(site => {
-        const filesMap: { [key: string]: any } = {};
-        Object.entries(site.files).forEach(([p, f]) => {
-          filesMap[p] = {
-            path: f.path,
-            name: f.name,
-            mimeType: f.mimeType,
-            size: f.size,
-            isBinary: f.isBinary,
-            textValue: f.textValue,
-            base64: arrayBufferToBase64(f.content)
-          };
-        });
-        return {
-          id: site.id,
-          name: site.name,
-          createdAt: site.createdAt,
-          files: filesMap
-        };
-      });
-      localStorage.setItem('ziphost_sites', JSON.stringify(serialized));
+      // Save each site into IndexedDB
+      for (const site of updatedSites) {
+        await saveSiteToDB(site);
+      }
     } catch (e) {
-      console.warn('[ZipHost] LocalStorage quota limit warning. Multi-site is active in memory but full storage persist skipped.');
+      console.warn('[ZipHost] IndexedDB write failed:', e);
     }
   };
 
@@ -279,71 +252,108 @@ export default function App() {
   // ----------------------------------------------------
   // INTERACTIVE ZIP PARSING & EXTRACTOR FLOWS
   // ----------------------------------------------------
-  const handleZipFile = async (file: File) => {
-    if (!file.name.endsWith('.zip')) {
-      setError('Invalid format. Please upload a .zip folder.');
-      return;
-    }
-    
+  const handleUploadedFile = async (file: File) => {
     setIsParsing(true);
     setError(null);
     
     try {
-      const zip = new JSZip();
-      const contents = await zip.loadAsync(file);
-      const filesMap: { [path: string]: VirtualFile } = {};
-      const filePaths: string[] = [];
-      const promises: Promise<void>[] = [];
-      
-      contents.forEach((relativePath, fileItem) => {
-        if (fileItem.dir) return;
+      let filesMap: { [path: string]: VirtualFile } = {};
+      let entryFile = 'index.html';
+      let siteName = file.name;
+
+      if (file.name.endsWith('.zip')) {
+        const zip = new JSZip();
+        const contents = await zip.loadAsync(file);
+        const filePaths: string[] = [];
+        const promises: Promise<void>[] = [];
         
-        const promise = (async () => {
-          const name = fileItem.name.split('/').pop() || fileItem.name;
-          const mimeType = getMimeType(name);
-          const isBinary = isBinaryFile(name, mimeType);
-          const arrayBuffer = await fileItem.async('arraybuffer');
+        contents.forEach((relativePath, fileItem) => {
+          if (fileItem.dir) return;
           
-          let textValue: string | undefined;
-          if (!isBinary) {
-            textValue = await fileItem.async('string');
+          const promise = (async () => {
+            const name = fileItem.name.split('/').pop() || fileItem.name;
+            const mimeType = getMimeType(name);
+            const isBinary = isBinaryFile(name, mimeType);
+            const arrayBuffer = await fileItem.async('arraybuffer');
+            
+            let textValue: string | undefined;
+            if (!isBinary) {
+              textValue = await fileItem.async('string');
+            }
+            
+            filesMap[relativePath] = {
+              path: relativePath,
+              name,
+              mimeType,
+              content: arrayBuffer,
+              textValue,
+              size: arrayBuffer.byteLength,
+              isBinary
+            };
+            
+            filePaths.push(relativePath);
+          })();
+          
+          promises.push(promise);
+        });
+        
+        await Promise.all(promises);
+        
+        if (filePaths.length === 0) {
+          throw new Error('This ZIP archive appears to be empty.');
+        }
+        
+        const foundEntry = filePaths.find(p => p.toLowerCase() === 'index.html') 
+                         || filePaths.find(p => p.toLowerCase().endsWith('index.html'));
+        
+        if (foundEntry) {
+          entryFile = foundEntry;
+        } else {
+          const firstHtml = filePaths.find(p => p.toLowerCase().endsWith('.html') || p.toLowerCase().endsWith('.htm'));
+          if (firstHtml) {
+            entryFile = firstHtml;
+          } else if (filePaths.length > 0) {
+            entryFile = filePaths[0];
           }
-          
-          filesMap[relativePath] = {
-            path: relativePath,
-            name,
-            mimeType,
+        }
+        siteName = file.name.replace(/\.zip$/i, '');
+      } else {
+        // Raw file upload (e.g. index.html or another single file)
+        const name = file.name;
+        const mimeType = getMimeType(name);
+        const isBinary = isBinaryFile(name, mimeType);
+        const arrayBuffer = await file.arrayBuffer();
+        
+        let textValue: string | undefined;
+        if (!isBinary) {
+          textValue = await file.text();
+        }
+        
+        filesMap[name] = {
+          path: name,
+          name,
+          mimeType,
+          content: arrayBuffer,
+          textValue,
+          size: arrayBuffer.byteLength,
+          isBinary
+        };
+        
+        // If they upload a single .html file that is not index.html, duplicate it as index.html
+        // so that the default preview runs immediately!
+        if (name !== 'index.html' && mimeType === 'text/html') {
+          filesMap['index.html'] = {
+            path: 'index.html',
+            name: 'index.html',
+            mimeType: 'text/html',
             content: arrayBuffer,
             textValue,
             size: arrayBuffer.byteLength,
-            isBinary
+            isBinary: false
           };
-          
-          filePaths.push(relativePath);
-        })();
-        
-        promises.push(promise);
-      });
-      
-      await Promise.all(promises);
-      
-      if (filePaths.length === 0) {
-        throw new Error('This ZIP archive appears to be empty.');
-      }
-      
-      let entryFile = 'index.html';
-      const foundEntry = filePaths.find(p => p.toLowerCase() === 'index.html') 
-                       || filePaths.find(p => p.toLowerCase().endsWith('index.html'));
-      
-      if (foundEntry) {
-        entryFile = foundEntry;
-      } else {
-        const firstHtml = filePaths.find(p => p.toLowerCase().endsWith('.html') || p.toLowerCase().endsWith('.htm'));
-        if (firstHtml) {
-          entryFile = firstHtml;
-        } else if (filePaths.length > 0) {
-          entryFile = filePaths[0];
         }
+        entryFile = 'index.html';
+        siteName = file.name.replace(/\.(html|htm|txt|css|js)$/i, '');
       }
       
       const newSiteId = `site-${Math.random().toString(36).substring(2, 8)}`;
@@ -351,7 +361,7 @@ export default function App() {
       
       const newSite: HostedSite = {
         id: newSiteId,
-        name: file.name.replace(/\.zip$/i, ''),
+        name: siteName,
         files: filesMap,
         createdAt: Date.now()
       };
@@ -365,7 +375,7 @@ export default function App() {
       
     } catch (err: any) {
       console.error('[ZipHost] Extraction error:', err);
-      setError(err.message || 'Failed to extract the website ZIP.');
+      setError(err.message || 'Failed to extract or host the uploaded file.');
     } finally {
       setIsParsing(false);
     }
@@ -384,7 +394,7 @@ export default function App() {
     setIsDragging(false);
     setError(null);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      handleZipFile(e.dataTransfer.files[0]);
+      handleUploadedFile(e.dataTransfer.files[0]);
     }
   };
 
@@ -526,6 +536,50 @@ export default function App() {
     } catch (err: any) {
       console.error(err);
       setError('Failed to instantiate boilerplate template.');
+    } finally {
+      setIsParsing(false);
+    }
+  };
+
+  const handleCreateBlankSite = async (name: string) => {
+    if (!name.trim()) return;
+    setIsParsing(true);
+    setError(null);
+    try {
+      const defaultHtml = `<!DOCTYPE html>\n<html lang="en">\n<head>\n  <meta charset="UTF-8">\n  <title>${name}</title>\n  <script src="https://cdn.tailwindcss.com"></script>\n</head>\n<body class="bg-slate-900 text-white min-h-screen flex items-center justify-center">\n  <div class="text-center p-8 bg-slate-800 rounded-2xl border border-slate-700 shadow-xl max-w-md w-full">\n    <h1 class="text-3xl font-extrabold text-blue-400 mb-2">${name}</h1>\n    <p class="text-slate-400 text-sm">Successfully created! Host is live.</p>\n    <p class="text-[10px] text-slate-500 mt-4">Edit this index.html using the Web IDE code panel on the left.</p>\n  </div>\n</body>\n</html>`;
+      const encoder = new TextEncoder();
+      const arrayBuffer = encoder.encode(defaultHtml).buffer;
+      const filesMap: { [path: string]: VirtualFile } = {
+        'index.html': {
+          path: 'index.html',
+          name: 'index.html',
+          mimeType: 'text/html',
+          content: arrayBuffer,
+          textValue: defaultHtml,
+          size: arrayBuffer.byteLength,
+          isBinary: false
+        }
+      };
+      
+      const newSiteId = `site-${Math.random().toString(36).substring(2, 8)}`;
+      await registerWithServiceWorker(newSiteId, filesMap);
+      
+      const newSite: HostedSite = {
+        id: newSiteId,
+        name: name.trim(),
+        files: filesMap,
+        createdAt: Date.now()
+      };
+      
+      const updatedSites = [newSite, ...sites];
+      setSites(updatedSites);
+      setActiveSiteId(newSiteId);
+      setActivePreviewPath('index.html');
+      setSelectedFilePath('index.html');
+      persistSites(updatedSites);
+    } catch (e: any) {
+      console.error(e);
+      setError('Failed to create blank site project.');
     } finally {
       setIsParsing(false);
     }
@@ -848,6 +902,8 @@ export default function App() {
       // 1. Boot sequence
       const runners = botRunnersRef.current;
       const eventHandlers: { start?: Function; message?: Function; stop?: Function } = {};
+      const botIntervals: number[] = [];
+      const botTimeouts: number[] = [];
       
       const appendBotLog = (msg: string) => {
         setBots(prevBots => prevBots.map(b => {
@@ -878,7 +934,44 @@ export default function App() {
         on: (event: 'start' | 'message' | 'stop', callback: Function) => {
           eventHandlers[event] = callback;
         },
-        sendReply: (text: string) => sendBotReplyInChat(text)
+        sendReply: (text: string) => sendBotReplyInChat(text),
+        getAI: async (prompt: string, callback: (reply: string) => void) => {
+          try {
+            appendBotLog(`🤖 Contacting server-side Gemini AI proxy...`);
+            const res = await fetch('/api/bot/ai', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ prompt })
+            });
+            const data = await res.json();
+            callback(data.reply || "No response received.");
+          } catch (err: any) {
+            appendBotLog(`❌ Bot AI request failed: ${err.message}`);
+            callback(`[AI Error: ${err.message || 'Service offline'}]`);
+          }
+        },
+        setInterval: (fn: Function, delay: number) => {
+          const id = window.setInterval(() => {
+            try {
+              fn();
+            } catch (e: any) {
+              appendBotLog(`⚠️ Interval runtime crash: ${e.message}`);
+            }
+          }, delay);
+          botIntervals.push(id);
+          return id;
+        },
+        setTimeout: (fn: Function, delay: number) => {
+          const id = window.setTimeout(() => {
+            try {
+              fn();
+            } catch (e: any) {
+              appendBotLog(`⚠️ Timeout runtime crash: ${e.message}`);
+            }
+          }, delay);
+          botTimeouts.push(id);
+          return id;
+        }
       };
 
       appendBotLog(`⚙️ Preparing container environment sandbox...`);
@@ -889,8 +982,12 @@ export default function App() {
         const compiler = new Function('bot', bot.scriptValue);
         compiler(botContext);
         
-        // Save handlers to ref
-        runners[botId] = eventHandlers;
+        // Save handlers to ref along with intervals and timeouts for reliable cleanup
+        runners[botId] = {
+          ...eventHandlers,
+          _intervals: botIntervals,
+          _timeouts: botTimeouts
+        } as any;
 
         // Set state to RUNNING
         setBots(prev => prev.map(b => b.id === botId ? { ...b, status: 'RUNNING' } : b));
@@ -905,16 +1002,29 @@ export default function App() {
       } catch (err: any) {
         appendBotLog(`❌ COMPILE/RUNTIME CRASH: ${err.message}`);
         setBots(prev => prev.map(b => b.id === botId ? { ...b, status: 'CRASHED' } : b));
+        
+        // Clear anything that might have scheduled before crash
+        botIntervals.forEach(window.clearInterval);
+        botTimeouts.forEach(window.clearTimeout);
       }
 
     } else {
       // 2. Shut down sequence
-      const handlers = botRunnersRef.current[botId];
-      if (handlers && handlers.stop) {
-        try {
-          handlers.stop();
-        } catch (e: any) {
-          console.warn('Error in bot stop trigger:', e);
+      const runner = botRunnersRef.current[botId] as any;
+      if (runner) {
+        // Clear all background intervals and timeouts immediately
+        if (runner._intervals) {
+          runner._intervals.forEach(window.clearInterval);
+        }
+        if (runner._timeouts) {
+          runner._timeouts.forEach(window.clearTimeout);
+        }
+        if (runner.stop) {
+          try {
+            runner.stop();
+          } catch (e: any) {
+            console.warn('Error in bot stop trigger:', e);
+          }
         }
       }
 
@@ -1052,74 +1162,82 @@ export default function App() {
           /* STATIC WEB HOSTING WORKSPACE                                         */
           /* ==================================================================== */
           <div className="flex-1 flex flex-col gap-6 min-h-0">
-            {/* Top Toolbar: Website Cloner & Project Switches */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 bg-slate-950/40 p-4 rounded-2xl border border-slate-900">
-              {/* Site Switcher Dropdown */}
-              <div className="lg:col-span-4 flex items-center gap-2">
-                <FolderOpen className="w-4 h-4 text-slate-400 flex-shrink-0" />
-                <select
-                  value={activeSiteId || ''}
-                  onChange={(e) => {
-                    const id = e.target.value;
-                    setActiveSiteId(id || null);
-                    const site = sites.find(s => s.id === id);
-                    if (site) {
-                      const keys = Object.keys(site.files);
-                      const entry = keys.find(k => k.endsWith('index.html')) || keys[0] || null;
-                      setSelectedFilePath(entry);
-                      if (entry) setActivePreviewPath(entry);
-                    }
-                  }}
-                  className="flex-1 bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-2 py-1.5 outline-none focus:border-blue-500 font-mono"
-                >
-                  <option value="" disabled>--- SELECT ACTIVE VIRTUAL SITE ---</option>
-                  {sites.map(s => (
-                    <option key={s.id} value={s.id}>{s.name} ({Object.keys(s.files).length} files)</option>
-                  ))}
-                </select>
-                {activeSiteId && (
+            {/* Top Toolbar: Render compact controls if site active, otherwise render Master Hub */}
+            {activeSite && (
+              <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 bg-slate-950/40 p-4 rounded-2xl border border-slate-900 shadow-xl">
+                {/* Site Workspace Switcher with Back Button */}
+                <div className="flex items-center gap-2 min-w-0">
                   <button
-                    onClick={() => handleUnloadSite(activeSiteId)}
-                    className="p-1.5 bg-red-950/20 hover:bg-red-950/40 text-red-400 border border-red-900/30 rounded-lg hover:border-red-900/60 transition-all cursor-pointer"
+                    onClick={() => setActiveSiteId(null)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-800 hover:border-slate-700 text-xs font-semibold rounded-lg transition-all cursor-pointer shadow-md flex-shrink-0"
+                    title="Return to Sites Hub Dashboard"
+                  >
+                    ← Dashboard
+                  </button>
+                  <div className="h-4 w-[1px] bg-slate-800 flex-shrink-0" />
+                  <FolderOpen className="w-4 h-4 text-slate-400 flex-shrink-0" />
+                  <select
+                    value={activeSiteId || ''}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setActiveSiteId(id || null);
+                      const site = sites.find(s => s.id === id);
+                      if (site) {
+                        const keys = Object.keys(site.files);
+                        const entry = keys.find(k => k.endsWith('index.html')) || keys[0] || null;
+                        setSelectedFilePath(entry);
+                        if (entry) setActivePreviewPath(entry);
+                      }
+                    }}
+                    className="flex-1 bg-slate-900 border border-slate-800 text-xs text-slate-200 rounded-lg px-2.5 py-1.5 outline-none focus:border-blue-500 font-mono max-w-[200px]"
+                  >
+                    <option value="" disabled>Select project...</option>
+                    {sites.map(s => (
+                      <option key={s.id} value={s.id}>{s.name} ({Object.keys(s.files).length} files)</option>
+                    ))}
+                  </select>
+                  <button
+                    onClick={() => handleUnloadSite(activeSite.id)}
+                    className="p-1.5 bg-red-950/20 hover:bg-red-950/40 text-red-400 border border-red-900/30 rounded-lg hover:border-red-900/60 transition-all cursor-pointer flex-shrink-0"
                     title="Unload this site"
                   >
                     <Trash2 className="w-3.5 h-3.5" />
                   </button>
-                )}
-              </div>
-
-              {/* Website URL Cloner Extractor */}
-              <div className="lg:col-span-8 flex flex-col sm:flex-row gap-2">
-                <div className="flex-1 flex items-center bg-slate-900 px-3 py-1 border border-slate-800 rounded-lg focus-within:border-blue-500/50 transition-all">
-                  <Link2 className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mr-2" />
-                  <input
-                    type="text"
-                    placeholder="Enter any public website URL to extract (e.g. tailwindcss.com)"
-                    value={clonerUrl}
-                    onChange={(e) => setClonerUrl(e.target.value)}
-                    className="flex-1 bg-transparent border-none text-xs text-slate-300 outline-none focus:ring-0 placeholder-slate-600"
-                    disabled={isCloning}
-                  />
                 </div>
-                <button
-                  onClick={handleUrlCloning}
-                  disabled={isCloning || !clonerUrl.trim()}
-                  className="flex items-center justify-center gap-1.5 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white text-xs font-semibold rounded-lg cursor-pointer transition-colors"
-                >
-                  {isCloning ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      <span>Extracting Website...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Sparkles className="w-3.5 h-3.5" />
-                      <span>Extract & Auto-Download</span>
-                    </>
-                  )}
-                </button>
+
+                {/* Compact IDE Cloner / Link extractor */}
+                <div className="flex-1 flex flex-col sm:flex-row gap-2 max-w-2xl">
+                  <div className="flex-1 flex items-center bg-slate-900 px-3 py-1 border border-slate-800 rounded-lg focus-within:border-blue-500/40 transition-all">
+                    <Link2 className="w-3.5 h-3.5 text-slate-500 flex-shrink-0 mr-2" />
+                    <input
+                      type="text"
+                      placeholder="Enter website URL to extract (auto-downloads bundle)"
+                      value={clonerUrl}
+                      onChange={(e) => setClonerUrl(e.target.value)}
+                      className="flex-1 bg-transparent border-none text-xs text-slate-355 outline-none focus:ring-0 placeholder-slate-600 font-mono"
+                      disabled={isCloning}
+                    />
+                  </div>
+                  <button
+                    onClick={handleUrlCloning}
+                    disabled={isCloning || !clonerUrl.trim()}
+                    className="flex items-center justify-center gap-1.5 px-4 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white text-xs font-semibold rounded-lg cursor-pointer transition-colors"
+                  >
+                    {isCloning ? (
+                      <>
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        <span>Extracting...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Sparkles className="w-3.5 h-3.5" />
+                        <span>Extract Code</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Error notifications */}
             {error && (
@@ -1138,85 +1256,300 @@ export default function App() {
 
             <AnimatePresence mode="wait">
               {!activeSite ? (
-                /* Unloaded / No Sites State */
+                /* ==================================================================== */
+                /* HIGH END SITES HUB DASHBOARD (Unloaded State)                        */
+                /* ==================================================================== */
                 <motion.div
                   key="no-site-pane"
                   initial={{ opacity: 0, y: 10 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: -10 }}
-                  className="flex-1 grid grid-cols-1 lg:grid-cols-2 gap-8 items-center"
+                  className="flex-1 flex flex-col gap-6 overflow-y-auto pr-1"
                 >
-                  {/* Left drag-drop container */}
-                  <div
-                    onDragOver={handleDragOver}
-                    onDragLeave={handleDragLeave}
-                    onDrop={handleDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                    className={`h-[350px] p-8 rounded-3xl border-2 border-dashed flex flex-col items-center justify-center text-center cursor-pointer transition-all ${
-                      isDragging
-                        ? 'border-blue-500 bg-blue-950/20 shadow-xl'
-                        : 'border-slate-800/80 bg-slate-950/20 hover:border-slate-700 hover:bg-slate-900/10'
-                    }`}
-                  >
-                    <input
-                      type="file"
-                      ref={fileInputRef}
-                      onChange={(e) => e.target.files && handleZipFile(e.target.files[0])}
-                      accept=".zip"
-                      className="hidden"
-                    />
-                    {isParsing ? (
-                      <div className="flex flex-col items-center">
-                        <Loader2 className="w-12 h-12 text-blue-500 animate-spin mb-4" />
-                        <h3 className="text-sm font-semibold">Parsing Website Bundle...</h3>
-                        <p className="text-xs text-slate-500 mt-1 max-w-xs leading-relaxed">
-                          Unzipping static file trees and injecting virtual Service Worker caches.
+                  {/* Extractor Hero Console */}
+                  <div className="bg-slate-950/40 p-6 rounded-3xl border border-slate-900 shadow-xl relative overflow-hidden">
+                    <div className="absolute top-0 right-0 w-80 h-80 bg-blue-600/5 rounded-full blur-[80px] pointer-events-none" />
+                    <div className="flex flex-col gap-4">
+                      <div>
+                        <h2 className="text-base font-bold tracking-tight font-display text-white flex items-center gap-2">
+                          <Sparkles className="w-5 h-5 text-blue-400 animate-pulse" />
+                          Web Extractor & Source Code Downloader
+                        </h2>
+                        <p className="text-xs text-slate-400 mt-1">
+                          Enter any public website address. ZipHost will extract its full assets and trigger an automatic ZIP backup download!
                         </p>
                       </div>
-                    ) : (
-                      <div className="flex flex-col items-center">
-                        <UploadCloud className="w-12 h-12 text-slate-500 mb-4" />
-                        <h3 className="text-sm font-semibold">Drop Static Website ZIP Here</h3>
-                        <p className="text-xs text-slate-500 mt-2 max-w-xs leading-relaxed">
-                          Extracts stylesheets, html layouts, icons, and folder trees dynamically in-browser.
-                        </p>
-                        <button className="mt-5 px-3 py-1.5 bg-blue-600 hover:bg-blue-500 text-white text-xs font-semibold rounded-lg shadow-lg shadow-blue-500/10">
-                          Select ZIP Local File
+
+                      <div className="flex flex-col sm:flex-row gap-2.5">
+                        <div className="flex-1 flex items-center bg-slate-900 px-3.5 py-2 border border-slate-800 rounded-xl focus-within:border-blue-500/50 transition-all shadow-inner">
+                          <Link2 className="w-4 h-4 text-slate-500 flex-shrink-0 mr-2.5" />
+                          <input
+                            type="text"
+                            placeholder="e.g. https://tailwindcss.com or play.google.com"
+                            value={clonerUrl}
+                            onChange={(e) => setClonerUrl(e.target.value)}
+                            onKeyDown={(e) => e.key === 'Enter' && clonerUrl.trim() && !isCloning && handleUrlCloning()}
+                            className="flex-1 bg-transparent border-none text-xs text-slate-200 outline-none focus:ring-0 placeholder-slate-600 font-mono"
+                            disabled={isCloning}
+                          />
+                        </div>
+                        <button
+                          onClick={handleUrlCloning}
+                          disabled={isCloning || !clonerUrl.trim()}
+                          className="flex items-center justify-center gap-2 px-5 py-2.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white text-xs font-semibold rounded-xl cursor-pointer transition-all duration-200 hover:shadow-lg hover:shadow-blue-500/15"
+                        >
+                          {isCloning ? (
+                            <>
+                              <Loader2 className="w-4 h-4 animate-spin" />
+                              <span>Extracting website...</span>
+                            </>
+                          ) : (
+                            <>
+                              <Sparkles className="w-4 h-4" />
+                              <span>Extract & Auto-Download</span>
+                            </>
+                          )}
                         </button>
                       </div>
-                    )}
+                    </div>
                   </div>
 
-                  {/* Right instant templates dashboard */}
-                  <div className="bg-slate-950/20 border border-slate-900 p-6 rounded-3xl h-[350px] overflow-auto flex flex-col">
-                    <div className="flex items-center gap-1.5 mb-4 text-xs font-bold text-slate-300">
-                      <BookOpen className="w-4 h-4 text-blue-400" />
-                      <span>SPIN UP DEVELOPER TEMPLATE (1-CLICK)</span>
-                    </div>
+                  {/* Drag/Drop Ingress & Creation Sandbox */}
+                  <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+                    {/* Upload or Create Blank */}
+                    <div className="xl:col-span-7 flex flex-col bg-slate-950/30 border border-slate-900 rounded-2xl p-6 gap-5">
+                      <h3 className="text-xs font-bold text-slate-300 tracking-wider uppercase flex items-center gap-1.5">
+                        <UploadCloud className="w-4 h-4 text-blue-400" />
+                        Deploy Custom Project
+                      </h3>
 
-                    <div className="space-y-3 flex-1 overflow-auto pr-1">
-                      {websiteTemplates.map((tpl) => (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                        {/* Drag-drop or click to upload ZIP */}
                         <div
-                          key={tpl.name}
-                          className="p-4 bg-slate-900/50 hover:bg-slate-900 border border-slate-900/60 hover:border-slate-800/80 rounded-2xl flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3 transition-all"
+                          onDragOver={handleDragOver}
+                          onDragLeave={handleDragLeave}
+                          onDrop={handleDrop}
+                          onClick={() => fileInputRef.current?.click()}
+                          className={`p-6 rounded-xl border border-dashed flex flex-col items-center justify-center text-center cursor-pointer transition-all min-h-[160px] ${
+                            isDragging
+                              ? 'border-blue-500 bg-blue-950/20 shadow-lg'
+                              : 'border-slate-800 bg-slate-900/20 hover:border-slate-700 hover:bg-slate-900/40'
+                          }`}
                         >
-                          <div className="max-w-md">
-                            <h4 className="text-xs font-bold text-slate-200">{tpl.name}</h4>
-                            <p className="text-[10px] text-slate-400 mt-1 leading-relaxed">{tpl.description}</p>
-                          </div>
-                          <button
-                            onClick={() => handleLoadTemplate(tpl)}
-                            className="flex-shrink-0 self-start sm:self-center px-3 py-1 bg-slate-850 hover:bg-slate-850 text-blue-400 border border-blue-500/20 hover:border-blue-500/40 text-xs font-semibold rounded-lg transition-all cursor-pointer"
-                          >
-                            Launch Sandbox
-                          </button>
+                          <input
+                            type="file"
+                            ref={fileInputRef}
+                            onChange={(e) => e.target.files && handleUploadedFile(e.target.files[0])}
+                            accept=".zip,.html,.htm"
+                            className="hidden"
+                          />
+                          {isParsing ? (
+                            <div className="flex flex-col items-center">
+                              <Loader2 className="w-8 h-8 text-blue-500 animate-spin mb-2" />
+                              <p className="text-[11px] font-bold text-slate-300">Parsing bundle...</p>
+                            </div>
+                          ) : (
+                            <div className="flex flex-col items-center">
+                              <UploadCloud className="w-8 h-8 text-slate-500 mb-2 animate-bounce" />
+                              <p className="text-[11px] font-bold text-slate-300">Upload ZIP or HTML</p>
+                              <p className="text-[9px] text-slate-500 mt-1.5 leading-relaxed">Drag-drop your archive or a single file to host instantly.</p>
+                            </div>
+                          )}
                         </div>
-                      ))}
+
+                        {/* Create Blank Workspace from Scratch */}
+                        <div className="p-5 rounded-xl border border-slate-800 bg-slate-900/20 flex flex-col justify-between gap-3 min-h-[160px]">
+                          <div>
+                            <p className="text-[11px] font-bold text-slate-300 flex items-center gap-1.5">
+                              <Plus className="w-3.5 h-3.5 text-blue-400" />
+                              Create Blank Project
+                            </p>
+                            <p className="text-[9px] text-slate-500 mt-1 leading-relaxed">
+                              Spin up an empty index.html project preconfigured with Tailwind CSS classes in seconds.
+                            </p>
+                          </div>
+
+                          <div className="flex gap-1.5 mt-2">
+                            <input
+                              type="text"
+                              placeholder="Project name (e.g. App)"
+                              value={blankSiteName}
+                              onChange={(e) => setBlankSiteName(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && blankSiteName.trim() && (handleCreateBlankSite(blankSiteName).then(() => setBlankSiteName('')))}
+                              className="flex-1 bg-slate-950 text-[11px] px-2.5 py-1.5 rounded-lg border border-slate-850 outline-none text-slate-300 placeholder-slate-600 font-mono"
+                            />
+                            <button
+                              onClick={() => {
+                                handleCreateBlankSite(blankSiteName);
+                                setBlankSiteName('');
+                              }}
+                              disabled={!blankSiteName.trim()}
+                              className="px-3 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white text-[11px] font-bold rounded-lg cursor-pointer transition-colors"
+                            >
+                              Create
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Starter Templates */}
+                    <div className="xl:col-span-5">
+                      <div className="bg-slate-950/30 border border-slate-900 rounded-2xl p-6 flex flex-col gap-4 h-full max-h-[254px]">
+                        <h3 className="text-xs font-bold text-slate-300 tracking-wider uppercase flex items-center gap-1.5">
+                          <BookOpen className="w-4 h-4 text-indigo-400" />
+                          1-Click Boilerplate Hub
+                        </h3>
+
+                        <div className="flex-1 overflow-auto pr-1 space-y-2.5">
+                          {websiteTemplates.map((tpl) => (
+                            <div
+                              key={tpl.name}
+                              className="p-3 bg-slate-900/40 hover:bg-slate-900/80 border border-slate-900 hover:border-slate-800/80 rounded-xl flex items-center justify-between gap-3 transition-all"
+                            >
+                              <div className="min-w-0">
+                                <h4 className="text-[11px] font-bold text-slate-200 truncate">{tpl.name}</h4>
+                                <p className="text-[9px] text-slate-500 mt-0.5 leading-tight truncate">{tpl.description}</p>
+                              </div>
+                              <button
+                                onClick={() => handleLoadTemplate(tpl)}
+                                className="flex-shrink-0 px-2.5 py-1 bg-slate-850 hover:bg-slate-800 text-blue-400 border border-blue-500/20 hover:border-blue-500/40 text-[10px] font-bold rounded-lg transition-all cursor-pointer"
+                              >
+                                Launch
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
                     </div>
                   </div>
+
+                  {/* Portfolio Virtual Hosts list */}
+                  {sites.length > 0 && (
+                    <div className="mt-4 flex flex-col gap-4">
+                      <div className="flex items-center justify-between border-b border-slate-900 pb-2">
+                        <h3 className="text-xs font-bold text-slate-400 tracking-wider uppercase flex items-center gap-1.5">
+                          <Globe className="w-4 h-4 text-emerald-400 animate-pulse" />
+                          📡 PORTFOLIO & LIVE VIRTUAL HOSTS ({sites.length} Active)
+                        </h3>
+                        <span className="text-[10px] text-slate-600 font-mono">Service worker container status: ACTIVE</span>
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {sites.map((site) => {
+                          const keys = Object.keys(site.files);
+                          const indexHtml = keys.find(k => k.endsWith('index.html')) || keys[0] || 'index.html';
+                          const totalBytes = Object.values(site.files).reduce((sum: number, f) => sum + (f as any).size, 0) as number;
+
+                          return (
+                            <motion.div
+                              key={site.id}
+                              initial={{ opacity: 0, y: 10 }}
+                              animate={{ opacity: 1, y: 0 }}
+                              className="bg-slate-950/50 border border-slate-900 hover:border-slate-800/80 rounded-2xl p-5 flex flex-col justify-between gap-4 shadow-xl hover:shadow-2xl transition-all relative overflow-hidden group"
+                            >
+                              {/* Background subtle visual accent */}
+                              <div className="absolute top-0 right-0 w-16 h-16 bg-blue-600/3 rounded-full blur-[30px] opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none" />
+
+                              <div>
+                                <div className="flex justify-between items-start gap-2">
+                                  <h4 className="text-sm font-bold text-slate-100 font-display group-hover:text-blue-400 transition-colors truncate">
+                                    {site.name}
+                                  </h4>
+                                  <span className="text-[9px] bg-slate-900 border border-slate-850 px-2 py-0.5 rounded-full font-mono text-slate-500 flex-shrink-0">
+                                    ID: {site.id}
+                                  </span>
+                                </div>
+
+                                <p className="text-[10px] text-slate-500 mt-1 font-mono">
+                                  Created {new Date(site.createdAt).toLocaleDateString()}
+                                </p>
+
+                                <div className="mt-4 flex items-center gap-3 text-[10px] font-mono text-slate-400 bg-slate-900/30 p-2.5 rounded-xl border border-slate-900">
+                                  <div className="flex flex-col">
+                                    <span className="text-slate-600 font-bold uppercase text-[8px]">Assets</span>
+                                    <span className="text-slate-200 mt-0.5">{keys.length} Files</span>
+                                  </div>
+                                  <div className="h-6 w-[1px] bg-slate-850" />
+                                  <div className="flex flex-col">
+                                    <span className="text-slate-600 font-bold uppercase text-[8px]">Total Size</span>
+                                    <span className="text-slate-200 mt-0.5">{formatBytes(totalBytes)}</span>
+                                  </div>
+                                  <div className="h-6 w-[1px] bg-slate-850" />
+                                  <div className="flex flex-col">
+                                    <span className="text-slate-600 font-bold uppercase text-[8px]">Status</span>
+                                    <span className="text-emerald-400 font-bold mt-0.5 flex items-center gap-1">
+                                      <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-ping" />
+                                      Live
+                                    </span>
+                                  </div>
+                                </div>
+                              </div>
+
+                              {/* Action Buttons footer */}
+                              <div className="grid grid-cols-12 gap-1.5 pt-2.5 border-t border-slate-900/60 mt-1">
+                                <button
+                                  onClick={() => {
+                                    setActiveSiteId(site.id);
+                                    setSelectedFilePath(indexHtml);
+                                    setActivePreviewPath(indexHtml);
+                                  }}
+                                  className="col-span-6 px-3 py-2 bg-blue-600/15 hover:bg-blue-600 text-blue-400 hover:text-white border border-blue-500/10 hover:border-blue-500/30 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer shadow-md"
+                                >
+                                  <Code2 className="w-3.5 h-3.5" />
+                                  <span>Open IDE</span>
+                                </button>
+
+                                <a
+                                  href={`/hosted/${site.id}/${indexHtml}`}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="col-span-3 px-2 py-2 bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800 hover:border-slate-700 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer"
+                                  title="Open live hosted page in a new tab"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                </a>
+
+                                <button
+                                  onClick={async () => {
+                                    const zip = new JSZip();
+                                    Object.entries(site.files).forEach(([p, rawF]) => {
+                                      const f = rawF as any;
+                                      zip.file(p, f.content);
+                                    });
+                                    const blob = await zip.generateAsync({ type: 'blob' });
+                                    const dlLink = document.createElement('a');
+                                    dlLink.href = URL.createObjectURL(blob);
+                                    dlLink.download = `${site.name}_export.zip`;
+                                    document.body.appendChild(dlLink);
+                                    dlLink.click();
+                                    document.body.removeChild(dlLink);
+                                  }}
+                                  className="col-span-3 px-2 py-2 bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800 hover:border-slate-700 text-xs font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer"
+                                  title="Download project as ZIP backup"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                </button>
+
+                                <button
+                                  onClick={() => handleUnloadSite(site.id)}
+                                  className="col-span-12 mt-1 py-1.5 bg-red-950/15 hover:bg-red-950/35 text-red-400 hover:text-red-300 border border-red-900/10 hover:border-red-900/30 text-[10px] font-semibold rounded-lg transition-all flex items-center justify-center gap-1 cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                  <span>Delete Virtual Project</span>
+                                </button>
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </motion.div>
               ) : (
-                /* Full Interactive Workspace IDE */
+                /* ==================================================================== */
+                /* FULL INTERACTIVE WORKSPACE IDE PANEL (Active Site State)             */
+                /* ==================================================================== */
                 <motion.div
                   key="ide-pane"
                   initial={{ opacity: 0 }}
