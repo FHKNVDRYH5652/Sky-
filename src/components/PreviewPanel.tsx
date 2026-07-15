@@ -124,7 +124,7 @@ export const PreviewPanel: React.FC<PreviewPanelProps> = ({ siteId, activePath }
               src={getSimulatedUrl()}
               className="w-full h-full bg-white rounded-sm border-0"
               sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
-              referrerPolicy="no-referrer"
+              referrerPolicy="same-origin"
             />
           </div>
         ) : (

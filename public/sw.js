@@ -2,6 +2,7 @@
 // Intercepts requests to /hosted/:siteId/... and serves them from in-memory or IndexedDB zip files
 
 const sites = {}; // Cache: siteId -> { filepath: { content: ArrayBuffer, mimeType: string } }
+const clientToSite = {}; // Map: clientId -> siteId for extremely robust subresource routing
 const DB_NAME = 'ziphost_db';
 const STORE_NAME = 'sites';
 
@@ -74,27 +75,40 @@ async function handleFetch(event) {
   const url = new URL(event.request.url);
   
   // Intercept requests targeting /hosted/<siteId>/...
-  let match = url.pathname.match(/^\/hosted\/([^\/]+)\/(.*)$/);
+  // Matches both with trailing slash, no trailing slash, or nested files
+  let match = url.pathname.match(/^\/hosted\/([^\/]+)(?:\/(.*))?$/);
   let siteId = '';
   let filePath = '';
   
   if (match) {
     siteId = match[1];
-    filePath = match[2];
+    filePath = match[2] || '';
+    if (event.clientId) {
+      clientToSite[event.clientId] = siteId;
+    }
   } else {
-    // Referrer Fallback: check if the request was made by a page inside /hosted/<siteId>/
-    const referrer = event.request.referrer;
-    if (referrer) {
-      try {
-        const refUrl = new URL(referrer);
-        const refMatch = refUrl.pathname.match(/^\/hosted\/([^\/]+)\/(.*)$/);
-        if (refMatch) {
-          siteId = refMatch[1];
-          // Use absolute path of the request for lookup (relative to root of the hosted site)
-          filePath = url.pathname;
+    // 1. Client ID check: if this client made a request earlier, it belongs to the same site
+    if (event.clientId && clientToSite[event.clientId]) {
+      siteId = clientToSite[event.clientId];
+      filePath = url.pathname;
+    } else {
+      // 2. Referrer Fallback: check if the request was made by a page inside /hosted/<siteId>/
+      const referrer = event.request.referrer;
+      if (referrer) {
+        try {
+          const refUrl = new URL(referrer);
+          const refMatch = refUrl.pathname.match(/^\/hosted\/([^\/]+)(?:\/(.*))?$/);
+          if (refMatch) {
+            siteId = refMatch[1];
+            // Use absolute path of the request for lookup (relative to root of the hosted site)
+            filePath = url.pathname;
+            if (event.clientId) {
+              clientToSite[event.clientId] = siteId;
+            }
+          }
+        } catch (e) {
+          // Ignore malformed referrer URLs
         }
-      } catch (e) {
-        // Ignore malformed referrer URLs
       }
     }
   }
