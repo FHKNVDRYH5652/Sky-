@@ -26,3 +26,14 @@ export interface FileTreeNode {
   isDirectory: boolean;
   children?: FileTreeNode[];
 }
+
+export interface BotScript {
+  id: string;
+  name: string;
+  scriptValue: string;
+  status: 'IDLE' | 'RUNNING' | 'CRASHED';
+  logs: string[];
+  env: { [key: string]: string };
+  createdAt: number;
+}
+

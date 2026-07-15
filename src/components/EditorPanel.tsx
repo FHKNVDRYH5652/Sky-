@@ -4,26 +4,45 @@
  */
 
 import React, { useState, useEffect } from 'react';
-import { Save, AlertCircle, FileText, Check, Image as ImageIcon } from 'lucide-react';
+import { 
+  Save, 
+  AlertCircle, 
+  FileText, 
+  Check, 
+  Image as ImageIcon,
+  Sparkles,
+  Loader2,
+  Undo2
+} from 'lucide-react';
 import { VirtualFile } from '../types';
 import { formatBytes } from '../utils';
 
 interface EditorPanelProps {
   file: VirtualFile | null;
   onSaveContent: (path: string, newText: string) => void;
+  projectContext?: { [path: string]: string };
 }
 
-export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent }) => {
+export const EditorPanel: React.FC<EditorPanelProps> = ({ 
+  file, 
+  onSaveContent,
+  projectContext = {}
+}) => {
   const [code, setCode] = useState<string>('');
+  const [originalCode, setOriginalCode] = useState<string>('');
   const [isSaved, setIsSaved] = useState<boolean>(true);
   const [imageUrl, setImageUrl] = useState<string | null>(null);
+  
+  // AI Copilot state
+  const [aiPrompt, setAiPrompt] = useState<string>('');
+  const [isAiWorking, setIsAiWorking] = useState<boolean>(false);
+  const [aiError, setAiError] = useState<string | null>(null);
 
   // Synchronize state when file change
   useEffect(() => {
     if (!file) return;
 
     if (file.isBinary) {
-      // Create Object URL for image preview if applicable
       if (file.mimeType.startsWith('image/')) {
         const blob = new Blob([file.content], { type: file.mimeType });
         const url = URL.createObjectURL(blob);
@@ -34,11 +53,13 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent })
       }
       setImageUrl(null);
     } else {
-      // Textual file
       const text = file.textValue || '';
       setCode(text);
+      setOriginalCode(text);
       setIsSaved(true);
       setImageUrl(null);
+      setAiError(null);
+      setAiPrompt('');
     }
   }, [file]);
 
@@ -50,7 +71,55 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent })
   const handleSave = () => {
     if (!file) return;
     onSaveContent(file.path, code);
+    setOriginalCode(code);
     setIsSaved(true);
+  };
+
+  const handleUndoAi = () => {
+    setCode(originalCode);
+    setIsSaved(originalCode === (file?.textValue || ''));
+  };
+
+  // Trigger Gemini AI Code Assistance
+  const handleAiEdit = async () => {
+    if (!file || !aiPrompt.trim()) return;
+    
+    setIsAiWorking(true);
+    setAiError(null);
+    
+    try {
+      const res = await fetch('/api/ai/edit', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          prompt: aiPrompt,
+          filePath: file.path,
+          fileContent: code,
+          projectContext
+        }),
+      });
+
+      if (!res.ok) {
+        const errData = await res.json();
+        throw new Error(errData.error || 'Failed to edit code.');
+      }
+
+      const data = await res.json();
+      if (data.code !== undefined) {
+        setCode(data.code);
+        setIsSaved(false);
+        setAiPrompt('');
+      } else {
+        throw new Error('AI didn\'t return any updated code.');
+      }
+    } catch (err: any) {
+      console.error('[Editor AI Error]:', err);
+      setAiError(err.message || 'Failed to call Gemini AI.');
+    } finally {
+      setIsAiWorking(false);
+    }
   };
 
   if (!file) {
@@ -98,13 +167,12 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent })
       </div>
 
       {/* Editor Content Area */}
-      <div className="flex-1 overflow-auto min-h-0 bg-slate-950/70 relative">
+      <div className="flex-1 overflow-auto min-h-0 bg-slate-950/70 relative flex flex-col">
         {file.isBinary ? (
           /* Binary file renderer (e.g. Image Preview) */
           <div className="flex flex-col items-center justify-center h-full p-6 bg-slate-950">
             {imageUrl ? (
               <div className="flex flex-col items-center max-w-full">
-                {/* Chequered transparency background for images */}
                 <div 
                   className="rounded-lg p-2 border border-slate-800 shadow-xl max-w-full"
                   style={{
@@ -136,8 +204,8 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent })
             )}
           </div>
         ) : (
-          /* Text/Code Editor */
-          <div className="relative h-full flex flex-col font-mono text-xs">
+          /* Text/Code Editor and Inline AI Assistant */
+          <div className="relative flex-1 flex flex-col font-mono text-xs min-h-0">
             {/* Warning indicator if unsaved */}
             {!isSaved && (
               <div className="absolute top-3 right-3 z-10 flex items-center gap-1.5 px-2.5 py-1 bg-amber-500/10 border border-amber-500/30 text-amber-300 text-[10px] rounded-full animate-pulse shadow-sm backdrop-blur-md">
@@ -154,6 +222,57 @@ export const EditorPanel: React.FC<EditorPanelProps> = ({ file, onSaveContent })
               className="w-full flex-1 p-5 outline-none bg-transparent text-slate-300 resize-none font-mono text-xs leading-relaxed focus:ring-0 focus:border-none focus:outline-none"
               style={{ tabSize: 2 }}
             />
+
+            {/* AI Copilot Panel */}
+            <div className="p-3 bg-slate-900/60 border-t border-slate-900/80 flex flex-col gap-2 flex-shrink-0">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-1.5 text-[10px] font-semibold text-blue-400">
+                  <Sparkles className="w-3.5 h-3.5 animate-pulse" />
+                  <span>GEMINI CO-WRITER (PRO MAX)</span>
+                </div>
+                {code !== originalCode && (
+                  <button 
+                    onClick={handleUndoAi}
+                    className="flex items-center gap-1 text-[9px] text-slate-500 hover:text-slate-300 font-sans cursor-pointer"
+                    title="Revert to pre-AI state"
+                  >
+                    <Undo2 className="w-3 h-3" />
+                    <span>Undo AI edits</span>
+                  </button>
+                )}
+              </div>
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  placeholder="Ask Gemini to edit code (e.g. 'add a beautiful responsive feedback form')"
+                  value={aiPrompt}
+                  onChange={(e) => setAiPrompt(e.target.value)}
+                  onKeyDown={(e) => e.key === 'Enter' && !isAiWorking && handleAiEdit()}
+                  className="flex-1 bg-slate-950 px-3 py-1.5 rounded-md border border-slate-800 text-xs text-slate-300 placeholder-slate-600 outline-none focus:border-blue-500/50 transition-all font-sans"
+                  disabled={isAiWorking}
+                />
+                <button
+                  onClick={handleAiEdit}
+                  disabled={isAiWorking || !aiPrompt.trim()}
+                  className="px-3 py-1.5 bg-blue-600 hover:bg-blue-500 disabled:bg-slate-800 text-white rounded-md text-xs font-medium flex items-center gap-1 cursor-pointer transition-colors"
+                >
+                  {isAiWorking ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  ) : (
+                    <Sparkles className="w-3.5 h-3.5" />
+                  )}
+                  <span>{isAiWorking ? 'Coding...' : 'Edit'}</span>
+                </button>
+              </div>
+
+              {aiError && (
+                <p className="text-[10px] text-rose-400 flex items-center gap-1 font-sans">
+                  <AlertCircle className="w-3 h-3" />
+                  <span>{aiError}</span>
+                </p>
+              )}
+            </div>
           </div>
         )}
       </div>
